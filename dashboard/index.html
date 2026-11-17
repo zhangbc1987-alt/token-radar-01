@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Radar — pre-token protocols ranked by implied value</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="dot"></span><h1>TOKEN RADAR</h1><span class="tag">radar-2</span></div>
+  <p class="sub">Which protocol is worth farming next — and what to do about it. Every row records no token yet; each is ranked by what its launch would be worth if its record stayed as it is.</p>
+  <dl class="stats" id="stats"></dl>
+</header>
+<nav class="tabs" id="tabs" aria-label="Board views">
+  <button data-tab="all" class="on">All pre-token</button>
+  <button data-tab="watchlist">Watchlist</button>
+  <button data-tab="early">Early finds</button>
+  <button data-tab="flagged">Flagged</button>
+  <button data-tab="live">Live tokens</button>
+</nav>
+<section class="controls">
+  <label>Search <input id="q" type="search" placeholder="name or slug…" autocomplete="off"></label>
+  <label>Category <select id="cat"><option value="all">All categories</option></select></label>
+  <label>Chain <select id="chain"><option value="all">All chains</option></select></label>
+  <span class="count" id="count"></span>
+</section>
+<main>
+  <div class="tablewrap"><table id="board">
+    <thead><tr>
+      <th data-sort="rank">#</th><th data-sort="name">Protocol</th><th data-sort="category">Category</th>
+      <th data-sort="chains">Chains</th><th data-sort="tvl_usd">TVL</th><th data-sort="change_7d">7d</th>
+      <th data-sort="age_days">Age</th><th data-sort="implied_value_usd">Implied value</th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table></div>
+  <aside id="detail" class="detail" aria-live="polite"></aside>
+</main>
+<section class="method">
+  <h2>How the value is built — read this before trusting a rank</h2>
+  <p><b>Implied value = TVL × peer multiple × growth × maturity × chains × tier.</b>
+  <i>Peer multiple</i> is the median market-cap/TVL of token-bearing protocols in the same category (at least 3 peers, else the whole-market median 0.21), clamped to 0.05–0.60.
+  <i>Growth</i> is the 7-day TVL change clamped to −50…+100% (×0.80…×1.40).
+  <i>Maturity</i> is 0.70–1.00 from how long the protocol has run with no token (listed_at → snapshot date, 3 years max; unknown counts as 1 year).
+  <i>Chains</i> adds 3% per extra chain (max +15%).</p>
+  <p><b>Tiers.</b> <i>Watchlist</i> — the snapshot's own 40 (TVL ≥ $50M, no token recorded). <i>Early finds</i> — clean pre-token protocols below the floor. <i>Flagged</i> — a wrapped, staked or bridged product of a token that already trades; listed apart and <b>not ranked</b>, because no discount makes a wrapped product's “launch” honest — farm it for yield, not for a new token. <i>Live tokens</i> are shown apart, at the market's own market cap — never mixed into the ranked board.</p>
+  <p><b>Words matter.</b> “Records no token” means DefiLlama's record carries none — it is not proof a token does not exist. Implied value is this radar's own claim from the snapshot's figures, never a prediction that a token will be issued, when, or at what price. No protocol name is special-cased: the same formula scores every row. Snapshot: DefiLlama, 2026-11-14.</p>
+</section>
+<footer>Token Radar · snapshot 2026-11-14 · model radar-2 · static page, no network, all data in data.js</footer>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
