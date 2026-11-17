@@ -55,19 +55,38 @@
       o.value = v; o.textContent = v; el.appendChild(o);
     });
   }
-  fillSelect('cat', Array.from(new Set(rows.map(function (r) { return r.category || 'Uncategorised'; }))).sort());
-  fillSelect('chain', Array.from(new Set(rows.flatMap(function (r) { return r.chains; }))).sort());
+  // Filter selects: built from every list the page shows, so a category or
+  // chain that only exists on the Flagged or Live tab is still offered there.
+  var allRows = rows.concat(flagged, live);
+  var allCats = Array.from(new Set(allRows.map(function (r) { return r.category || 'Uncategorised'; }))).sort();
+  var allChains = Array.from(new Set(allRows.flatMap(function (r) { return r.chains; }))).sort();
+  fillSelect('cat', allCats);
+  fillSelect('chain', allChains);
 
   function visibleRows() {
     var q = state.q.trim().toLowerCase();
     // Flagged rows are unranked by design: listed by TVL, never by implied value.
+    // They still honour the column sort: rank, implied value and age have no
+    // meaning unranked, so those keys fall back to TVL.
     if (state.tab === 'flagged') {
-      return flagged.filter(function (r) {
+      var f = flagged.filter(function (r) {
         if (state.cat !== 'all' && (r.category || 'Uncategorised') !== state.cat) return false;
         if (state.chain !== 'all' && r.chains.indexOf(state.chain) < 0) return false;
         if (q && (r.name + ' ' + r.slug).toLowerCase().indexOf(q) < 0) return false;
         return true;
-      }).slice().sort(function (a, b) { return b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : 1); });
+      });
+      var fk = state.sort, fd = state.dir;
+      var fval = function (r) {
+        if (fk === 'name') return r.name.toLowerCase();
+        if (fk === 'category') return (r.category || '').toLowerCase();
+        if (fk === 'chains') return (r.chains[0] || '').toLowerCase();
+        if (fk === 'change_7d') return r.change_7d == null ? -9999 : r.change_7d;
+        return r.tvl_usd;
+      };
+      return f.slice().sort(function (a, b) {
+        var va = fval(a), vb = fval(b);
+        return (va < vb ? -1 : va > vb ? 1 : (a.slug < b.slug ? -1 : 1)) * fd;
+      });
     }
     var list = state.tab === 'live' ? live : rows.filter(function (r) {
       if (state.tab === 'watchlist' && r.tier !== 'watchlist') return false;
@@ -97,8 +116,11 @@
     document.querySelectorAll('#tabs button').forEach(function (b) {
       b.classList.toggle('on', b.dataset.tab === state.tab);
     });
+    // On the Flagged tab rank, implied value and age sort by TVL instead,
+    // so the highlight follows the key that actually sorts.
+    var hl = state.tab === 'flagged' && (state.sort === 'rank' || state.sort === 'implied_value_usd' || state.sort === 'age_days') ? 'tvl_usd' : state.sort;
     document.querySelectorAll('#board th').forEach(function (th) {
-      th.classList.toggle('sorted', th.dataset.sort === state.sort);
+      th.classList.toggle('sorted', th.dataset.sort === hl);
     });
     var list = visibleRows();
     var total = state.tab === 'live' ? live.length + ' live tokens' : state.tab === 'flagged' ? flagged.length + ' flagged (unranked)' : rows.length + ' rows';
@@ -129,6 +151,16 @@
         '<td class="num">' + (isLive || isFlag ? '—' : age(r.age_days)) + '</td>' +
         '<td class="num"><b>' + (isFlag ? 'not ranked' : money(val)) + '</b></td></tr>';
     }).join('');
+  }
+
+  // Where the peer multiple comes from: the category median only when the
+  // category has at least 3 token-bearing peers; otherwise the whole-market
+  // median (the model shrinks toward it, so the label names the source).
+  function peerLabel(b) {
+    var n = b.peer_count == null ? 0 : b.peer_count;
+    var cat = b.category || 'market';
+    if (n >= 3) return esc(cat) + ' median mcap/TVL (' + n + ' peers)';
+    return 'market median mcap/TVL (' + n + ' peers in ' + esc(cat) + ')';
   }
 
   function detail(slug) {
@@ -165,7 +197,7 @@
       '<div class="big">' + money(b.implied_value_usd) + ' <small>implied value</small></div>' +
       '<table class="breakdown">' +
       '<tr><td>TVL</td><td>' + money(b.tvl_usd) + '</td></tr>' +
-      '<tr><td>Peer multiple (' + esc(b.category || 'market') + ' median mcap/TVL)</td><td>×' + b.peer_multiple.toFixed(2) + '</td></tr>' +
+      '<tr><td>Peer multiple (' + peerLabel(b) + ')</td><td>×' + b.peer_multiple.toFixed(2) + '</td></tr>' +
       '<tr><td>Growth (7d ' + pct(b.change_7d) + ')</td><td>×' + b.growth_multiplier.toFixed(2) + '</td></tr>' +
       '<tr><td>Maturity (' + age(b.age_days) + ' with no token)</td><td>×' + b.maturity_multiplier.toFixed(2) + '</td></tr>' +
       '<tr><td>Chains (' + b.chains.length + ')</td><td>×' + b.chain_multiplier.toFixed(2) + '</td></tr></table>' +
@@ -183,11 +215,12 @@
     }
     if (parts[0] === 'filter' && parts[1]) {
       state.tab = ['all', 'watchlist', 'early', 'flagged', 'live'].indexOf(parts[1]) >= 0 ? parts[1] : 'all';
+      state.sel = null;
       if (parts[2]) {
-        var cats = Array.from(new Set(rows.map(function (r) { return r.category || 'Uncategorised'; })));
-        if (cats.indexOf(parts[2]) >= 0) { state.cat = parts[2]; document.getElementById('cat').value = parts[2]; }
+        if (allCats.indexOf(parts[2]) >= 0) { state.cat = parts[2]; document.getElementById('cat').value = parts[2]; }
+        else if (allRows.some(function (r) { return r.slug === parts[2]; })) { state.sel = parts[2]; }
       }
-      state.sel = null; render(); detail(null);
+      render(); detail(state.sel);
       return;
     }
     state.sel = null; render(); detail(null);

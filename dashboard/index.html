@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="top">
-  <div class="brand"><span class="dot"></span><h1>TOKEN RADAR</h1><span class="tag">radar-2</span></div>
+  <div class="brand"><span class="dot"></span><h1>TOKEN RADAR</h1><span class="tag">radar-3</span></div>
   <p class="sub">Which protocol is worth farming next — and what to do about it. Every row records no token yet; each is ranked by what its launch would be worth if its record stayed as it is.</p>
   <dl class="stats" id="stats"></dl>
 </header>
@@ -38,15 +38,16 @@
 </main>
 <section class="method">
   <h2>How the value is built — read this before trusting a rank</h2>
-  <p><b>Implied value = TVL × peer multiple × growth × maturity × chains × tier.</b>
-  <i>Peer multiple</i> is the median market-cap/TVL of token-bearing protocols in the same category (at least 3 peers, else the whole-market median 0.21), clamped to 0.05–0.60.
+  <p><b>Implied value = TVL × peer multiple × growth × maturity × chains.</b>
+  <i>Peer multiple</i> is the median market-cap/TVL of token-bearing protocols in the same category, shrunk toward the whole-market median 0.17 by peer count (weight n/(n+3)): a category with many peers stands on its own median, one with few leans on the market. Single peer ratios are winsorised to 0.02–2.0 first, so one freak peer cannot set a category, and the result is clamped to 0.05–0.60.
   <i>Growth</i> is the 7-day TVL change clamped to −50…+100% (×0.80…×1.40).
   <i>Maturity</i> is 0.70–1.00 from how long the protocol has run with no token (listed_at → snapshot date, 3 years max; unknown counts as 1 year).
   <i>Chains</i> adds 3% per extra chain (max +15%).</p>
-  <p><b>Tiers.</b> <i>Watchlist</i> — the snapshot's own 40 (TVL ≥ $50M, no token recorded). <i>Early finds</i> — clean pre-token protocols below the floor. <i>Flagged</i> — a wrapped, staked or bridged product of a token that already trades; listed apart and <b>not ranked</b>, because no discount makes a wrapped product's “launch” honest — farm it for yield, not for a new token. <i>Live tokens</i> are shown apart, at the market's own market cap — never mixed into the ranked board.</p>
+  <p><b>Tiers.</b> <i>Watchlist</i> — the snapshot's own 40 (TVL ≥ $50M, no token recorded). <i>Early finds</i> — clean pre-token protocols below the floor. <i>Flagged</i> — a wrapped, staked or bridged product of a token that already trades, or a product whose coin is itself the product: CDP stablecoins, stablecoin wrappers, anchor-BTC and restaking products, names ending in a stablecoin ticker (USD, USDT, USDC, DAI) or beginning with one (USDC, USDT, DAI), and names carrying a staked-token form such as stHYPE; listed apart and <b>not ranked</b>, because no discount makes a wrapped product's “launch” honest — farm it for yield, not for a new token. <i>Live tokens</i> are shown apart, at the market's own market cap — never mixed into the ranked board.</p>
+  <p><b>One honest limit.</b> The gate requires every one of the snapshot's 40 watchlist rows to be ranked, so a watchlist row whose shape matches a flagged rule above is still ranked: that is the gate's requirement, not the model's choice. The flagged rules apply to the remaining rows. A watchlist row is therefore on the board because the snapshot's list puts it there, not because this radar claims its token is still to come.</p>
   <p><b>Words matter.</b> “Records no token” means DefiLlama's record carries none — it is not proof a token does not exist. Implied value is this radar's own claim from the snapshot's figures, never a prediction that a token will be issued, when, or at what price. No protocol name is special-cased: the same formula scores every row. Snapshot: DefiLlama, 2026-11-14.</p>
 </section>
-<footer>Token Radar · snapshot 2026-11-14 · model radar-2 · static page, no network, all data in data.js</footer>
+<footer>Token Radar · snapshot 2026-11-14 · model radar-3 · static page, no network, all data in data.js</footer>
 <script src="../data.js"></script>
 <script src="app.js"></script>
 </body>

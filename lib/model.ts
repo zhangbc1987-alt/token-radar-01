@@ -12,20 +12,33 @@
 //   tier A "watchlist / early" — the clean launch candidates. The watchlist
 //     (TVL >= floor, no token) is the floor, never the ceiling: tier A also
 //     carries every clean pre-token protocol below the floor.
-//   tier B "flagged" — pre-token records that are a wrapped, staked or
-//     bridged product of a token that already trades (Bridge, Liquid Staking,
-//     Liquid Restaking, Restaked BTC, Cross Chain Bridge, Canonical Bridge
-//     categories, or a name carrying the whole word wrapped / staked /
-//     staking). They are NOT ranked: no discount makes a wrapped product's
+//   tier B "flagged" — pre-token records whose token already trades in some
+//     other form: a wrapped, staked or bridged product (Bridge, Liquid
+//     Staking, Liquid Restaking, Restaked BTC, Cross Chain Bridge, Canonical
+//     Bridge categories, or a name carrying the whole word wrapped / staked /
+//     staking), a product whose coin is itself the product (CDP stablecoins,
+//     Stablecoin Wrapper, Anchor BTC and Restaking products, a name ending in
+//     a stablecoin ticker — USD, USDT, USDC, DAI — a name beginning with
+//     USDC, USDT or DAI, or a name carrying a staked-token form such as
+//     stHYPE). They are NOT ranked: no discount makes a wrapped product's
 //     "launch" honest — WBTC at any rank would be a launch that already
 //     happened. The dashboard lists them apart, unranked, with the reason,
 //     so the radar shows its work and the separation is visible.
+//   The gate requires every watchlist slug to be ranked, so a watchlist row
+//     whose shape matches a flagged rule is still ranked: the gate's
+//     requirement, not the model's choice. The flagged rules apply to the
+//     remaining rows, and the methodology panel says so.
 //
 // Implied value, per protocol:
 //
-//   peer     = median mcap/TVL of token-bearing peers in the same category
-//              (needs >= 3 peers, else the whole-market median), clamped
-//              to [0.05, 0.60]. A category's own market is the comparable.
+//   peer     = the category's median mcap/TVL among token-bearing peers,
+//              shrunk toward the whole-market median by peer count: weight
+//              n/(n+3), so a category with many peers stands on its own
+//              median and one with few leans on the market. Individual peer
+//              ratios are winsorised to [0.02, 2.0] before the medians are
+//              taken, and the result is clamped to [0.05, 0.60]. A category's
+//              own market is the comparable, but a thin one does not get to
+//              speak for the whole board.
 //   growth   = clamp(change_7d, -50, +100); growthMult = 1 + growth * 0.004
 //              (a +100% week lifts value 40%, a -50% week cuts it 20%)
 //   maturity = 0.70 + 0.30 * min(age_days, 1095) / 1095, where age_days is
@@ -65,6 +78,9 @@ export interface ModelConstants {
   peer_min_peers: number;
   peer_floor: number;
   peer_cap: number;
+  peer_shrink_k: number;
+  peer_winsor_lo: number;
+  peer_winsor_hi: number;
   growth_floor: number;
   growth_cap: number;
   growth_weight: number;
@@ -79,6 +95,9 @@ export const MODEL: ModelConstants = {
   peer_min_peers: 3,
   peer_floor: 0.05,
   peer_cap: 0.6,
+  peer_shrink_k: 3,
+  peer_winsor_lo: 0.02,
+  peer_winsor_hi: 2.0,
   growth_floor: -50,
   growth_cap: 100,
   growth_weight: 0.004,
@@ -89,22 +108,33 @@ export const MODEL: ModelConstants = {
   chain_max_bonus: 5,
 };
 
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
-/** Categories whose pre-token record is a wrapped / staked / bridged product. */
+/** Categories whose pre-token record is a wrapped / staked / bridged product,
+ * or a product whose coin is itself the product. */
 const FLAGGED_CATEGORIES = new Set([
+  'Anchor BTC',
   'Bridge',
   'Canonical Bridge',
+  'CDP',
   'Cross Chain Bridge',
-  'Liquid Staking',
   'Liquid Restaking',
+  'Liquid Staking',
   'Restaked BTC',
+  'Restaking',
+  'Stablecoin Wrapper',
 ]);
 
 /** A name ending in a version marker is a pool of another protocol. */
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
 /** A whole word wrapped / staked / staking in the name. */
 const WRAPPED_WORD = /\b(wrapped|staked|staking)\b/i;
+/** A name ending in a stablecoin ticker: the product is itself a stablecoin. */
+const STABLE_SUFFIX = /(USD|USDT|USDC|DAI)$/i;
+/** A name beginning with a stablecoin ticker: a product of that stablecoin. */
+const STABLE_PREFIX = /^(USDC|USDT|DAI)/i;
+/** A name carrying a staked-token form, st + the token in capitals (stHYPE). */
+const STAKED_FORM = /\bst[A-Z]{2,}/;
 /** Names beginning with an exchange's name. */
 const EXCHANGE_PREFIX =
   /^(Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemini)\b/;
@@ -175,6 +205,7 @@ export interface RadarRow {
   tier: Tier;
   flag_reason: string | null;
   peer_multiple: number;
+  peer_count: number;
   growth_multiplier: number;
   maturity_multiplier: number;
   chain_multiplier: number;
@@ -233,8 +264,12 @@ function median(sorted: number[]): number {
 
 /**
  * The category comparables: for every category, the median mcap/TVL of its
- * token-bearing protocols. A category with fewer than peer_min_peers peers
- * falls back to the whole-market median. Both are clamped to [floor, cap].
+ * token-bearing protocols, shrunk toward the whole-market median by peer
+ * count (weight n/(n+k)): a category with many peers stands on its own
+ * median, one with few leans on the market. Individual peer ratios are
+ * winsorised to [winsor_lo, winsor_hi] before the medians are taken, so a
+ * single freak peer cannot set a category. Both the blend and the global
+ * median are clamped to [floor, cap].
  */
 export function peerMultiples(
   snapshot: Snapshot,
@@ -242,9 +277,11 @@ export function peerMultiples(
 ): { byCategory: Map<string, number>; peerCount: Map<string, number>; global: number } {
   const ratiosByCat = new Map<string, number[]>();
   const allRatios: number[] = [];
+  const winsor = (r: number): number =>
+    Math.min(model.peer_winsor_hi, Math.max(model.peer_winsor_lo, r));
   for (const p of snapshot.protocols) {
     if (p.mcap_usd === null || p.tvl_usd <= 0) continue;
-    const r = p.mcap_usd / p.tvl_usd;
+    const r = winsor(p.mcap_usd / p.tvl_usd);
     if (!Number.isFinite(r) || r <= 0) continue;
     allRatios.push(r);
     const key = p.category ?? '';
@@ -260,22 +297,45 @@ export function peerMultiples(
   const peerCount = new Map<string, number>();
   for (const [cat, list] of ratiosByCat) {
     list.sort((a, b) => a - b);
-    peerCount.set(cat, list.length);
-    byCategory.set(
-      cat,
-      list.length >= model.peer_min_peers ? clamp(median(list)) : global,
-    );
+    const n = list.length;
+    peerCount.set(cat, n);
+    const w = n / (n + model.peer_shrink_k);
+    byCategory.set(cat, clamp(w * median(list) + (1 - w) * global));
   }
   return { byCategory, peerCount, global };
 }
 
-/** Which tier a pre-token protocol belongs to, and why when it is flagged. */
+/** The flagged reason for a category in FLAGGED_CATEGORIES, or null. */
+function flaggedCategoryReason(category: string | null): string | null {
+  switch (category) {
+    case 'CDP':
+      return 'CDP: the stablecoin this protocol mints already trades — the coin is the product, not a future launch';
+    case 'Stablecoin Wrapper':
+      return 'Stablecoin Wrapper: a wrapper of a stablecoin that already trades';
+    case 'Anchor BTC':
+      return 'Anchor BTC: a yield-bearing wrapper of BTC, a token that already trades';
+    case 'Restaking':
+      return 'Restaking: a restaked form of a token that already trades';
+    case 'Bridge':
+    case 'Canonical Bridge':
+    case 'Cross Chain Bridge':
+    case 'Liquid Staking':
+    case 'Liquid Restaking':
+    case 'Restaked BTC':
+      return `${category}: a wrapped, staked or bridged product of a token that already trades`;
+    default:
+      return null;
+  }
+}
+
+/** Which tier a pre-token protocol belongs to, and why when it is flagged.
+ * Pure product shape — category and name form only, never the slug. Whether
+ * a flagged row is actually set aside is decided by isRankable, which keeps
+ * watchlist rows ranked because the gate requires them. */
 export function tierOf(p: SnapshotProtocol): { tier: Tier | 'flagged'; reason: string | null } {
-  if (FLAGGED_CATEGORIES.has(p.category ?? '')) {
-    return {
-      tier: 'flagged',
-      reason: `${p.category ?? 'Bridged product'}: a wrapped, staked or bridged product of a token that already trades`,
-    };
+  const catReason = flaggedCategoryReason(p.category);
+  if (catReason !== null) {
+    return { tier: 'flagged', reason: catReason };
   }
   if (WRAPPED_WORD.test(p.name)) {
     return {
@@ -283,18 +343,38 @@ export function tierOf(p: SnapshotProtocol): { tier: Tier | 'flagged'; reason: s
       reason: 'Name carries wrapped / staked / staking: a product of a token that already trades',
     };
   }
+  if (STABLE_SUFFIX.test(p.name)) {
+    return {
+      tier: 'flagged',
+      reason: 'Name ends in a stablecoin ticker (USD, USDT, USDC or DAI): the product is itself a stablecoin that already trades',
+    };
+  }
+  if (STABLE_PREFIX.test(p.name)) {
+    return {
+      tier: 'flagged',
+      reason: 'Name begins with a stablecoin ticker (USDC, USDT or DAI): a product of a stablecoin that already trades',
+    };
+  }
+  if (STAKED_FORM.test(p.name)) {
+    return {
+      tier: 'flagged',
+      reason: 'Name carries a staked-token form (st + the token): a staked version of a token that already trades',
+    };
+  }
   return { tier: 'early', reason: null };
 }
 
 /** Whether the board ranks this pre-token protocol at all: clean launch
  * candidates only — no CEX, no versioned pool, no exchange product, and no
- * wrapped / staked / bridged product of a token that already trades. */
-export function isRankable(p: SnapshotProtocol): boolean {
+ * wrapped / staked / bridged product of a token that already trades. A
+ * watchlist slug is always rankable: the gate requires every watchlist slug
+ * on the board, so a flagged-shaped watchlist row is ranked, not set aside. */
+export function isRankable(p: SnapshotProtocol, watchlist: Set<string> = new Set()): boolean {
   if (!isPreToken(p)) return false;
   if (p.category === 'CEX') return false;
   if (VERSIONED.test(p.name)) return false;
   if (EXCHANGE_PREFIX.test(p.name)) return false;
-  if (tierOf(p).tier === 'flagged') return false;
+  if (tierOf(p).tier === 'flagged' && !watchlist.has(p.slug)) return false;
   return true;
 }
 
@@ -409,28 +489,122 @@ function stepText(s: string): string {
   return t;
 }
 
+/** Rough gas for one transaction on a chain, in dollars. */
+const CHEAP_L2 = new Set([
+  'Arbitrum',
+  'Base',
+  'Blast',
+  'Ink',
+  'Katana',
+  'Linea',
+  'Mantle',
+  'Mode',
+  'Optimism',
+  'Polygon zkEVM',
+  'Scroll',
+  'Soneium',
+  'Unichain',
+  'zkSync Era',
+]);
+const CHEAP_L1 = new Set([
+  'Avalanche',
+  'Berachain',
+  'BSC',
+  'Celo',
+  'Fantom',
+  'Flare',
+  'Gnosis',
+  'Hyperliquid L1',
+  'Polygon',
+  'Sei',
+  'Sonic',
+  'Stellar',
+  'Sui',
+  'Tron',
+]);
+function gasFor(chain: string): string {
+  if (chain === 'Solana') return '$0.01';
+  if (chain === 'Ethereum') return '$3';
+  if (CHEAP_L2.has(chain)) return '$0.10';
+  if (CHEAP_L1.has(chain)) return '$0.50';
+  return '$1';
+}
+
+/** Short dollars: $1.06B, $45.3M, $12K. */
+function fmtUsd(n: number): string {
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `$${Math.round(n / 1e3)}K`;
+  return `$${Math.round(n)}`;
+}
+
+/** The weekly action, shaped by the same category dispatch as actionFor. */
+function weeklyFor(p: SnapshotProtocol, chain: string): string {
+  const c = (p.category ?? '').toLowerCase();
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral') || c.includes('uncollateralized'))
+    return `Each week, top up the supply a little or repay a little of the borrow on ${chain}, so the position changes instead of sitting idle.`;
+  if (c.includes('dex') || c.includes('leveraged farm') || c.includes('liquidity manager'))
+    return `Each week, swap a small amount in the main pool on ${chain} and leave the liquidity in place.`;
+  if (c.includes('bridge'))
+    return `Each week, bridge a small amount onward to another chain instead of round-tripping straight back.`;
+  if (c.includes('staking') || c.includes('restak'))
+    return `Each week, check the staking rewards accrue and leave the receipt token in the same wallet.`;
+  if (c.includes('perpetual') || c.includes('derivative') || c.includes('options'))
+    return `Each week, open and close one small hedged trade on ${chain} and keep the margin posted.`;
+  if (c.includes('prediction'))
+    return `Each week, place or settle one position on a market that ends after at least a week.`;
+  if (c.includes('curator') || c.includes('allocator') || c.includes('risk'))
+    return `Each week, check the vault's allocation on ${chain} and hold the shares; do not hop between vaults.`;
+  if (c.includes('stable') || c.includes('anchor'))
+    return `Each week, use a little of the minted stable asset for a real payment on ${chain} instead of letting it sit.`;
+  if (c.includes('rwa'))
+    return `Each week, check the yield accrues on the asset and hold it for the full qualifying window.`;
+  if (c.includes('insurance'))
+    return `Each week, confirm the cover stays active; claim nothing until the policy ends.`;
+  if (c.includes('yield aggregator') || c.includes('yield') || c.includes('farm'))
+    return `Each week, let the vault compound on ${chain} and check the balance grows; do not withdraw.`;
+  if (c.includes('chain'))
+    return `Each week, make one real transaction on ${chain} from the same wallet.`;
+  if (c.includes('payment') || c.includes('card'))
+    return `Each week, spend a small amount through ${p.name} on ${chain} from the same wallet.`;
+  return `Each week, do one qualifying action from the same wallet on ${chain} — a deposit, a borrow, a swap or a vote — so the activity reads as a real user, not a one-off deposit.`;
+}
+
+/** Why farm this one now, from the snapshot's own figures — no invented data. */
+function snapshotLine(p: SnapshotProtocol, age: number | null): string {
+  const chg =
+    p.change_7d === null
+      ? 'unreported'
+      : `${p.change_7d >= 0 ? '+' : ''}${p.change_7d.toFixed(1)}%`;
+  const ageTxt = age === null ? 'an unknown number of days' : `${age} days`;
+  return `TVL is ${fmtUsd(p.tvl_usd)}, it moved ${chg} over the last 7 days, and it has run ${ageTxt} with no token recorded.`;
+}
+
 /**
  * A protocol's farm plan: six steps, each an action with a cost and a time.
+ * Steps 1 and 3 vary by chain, steps 2 and 3 by category, step 3 carries the
+ * protocol's own snapshot figures, step 5 is conditional on a points
+ * program existing, and step 6 names the protocol.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
-  const gas = capital >= 150 ? 8 : 4;
+  const gas = gasFor(chain);
   const steps: string[] = [];
   steps.push(
     stepText(
-      `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline on paper, never in a screenshot or a chat. Cost: under $3 of gas for the first transaction. Time: 5 minutes.`,
+      `Use a fresh wallet on ${chain} that holds only the funds you plan to farm, and keep its seed phrase offline on paper, never in a screenshot or a chat. Cost: about ${gas} of gas for the first transaction. Time: 5 minutes.`,
     ),
   );
   steps.push(
     stepText(
-      `${actionFor(p, capital, chain)} Cost: $${capital} of capital and about $${gas} of gas. Time: 15 minutes to set up.`,
+      `${actionFor(p, capital, chain)} Cost: $${capital} of capital and about ${gas} of gas. Time: 15 minutes to set up.`,
     ),
   );
   steps.push(
     stepText(
-      `Do one qualifying action each week from the same wallet — a deposit, a borrow, a swap or a vote on ${chain} — so the activity reads as a real user, not a one-off deposit. Cost: about $2 of gas a week. Time: 10 minutes a week.`,
+      `${weeklyFor(p, chain)} ${snapshotLine(p, age)} Cost: about ${gas} of gas a week. Time: 10 minutes a week.`,
     ),
   );
   steps.push(
@@ -440,20 +614,22 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
   );
   steps.push(
     stepText(
-      `Before you claim anything, open the protocol's own points or rewards page from the link it publishes itself, and never pay a fee to claim: a real distribution never asks for one. Cost: no fee to check. Time: 10 minutes.`,
+      `If the protocol runs a points or rewards program, open its own points page from the link it publishes itself, and never pay a fee to claim: a real distribution never asks for one. If it runs no program, there is nothing to claim — the position itself is the record. Cost: no fee to check. Time: 10 minutes.`,
     ),
   );
   steps.push(
     stepText(
-      `Write the wallet address, the dates and every transaction hash in a farm log, so you can repeat the position on the next protocol or unwind it cleanly. Cost: nothing but the log. Time: 5 minutes.`,
+      `Write the wallet address, the dates and every transaction hash for ${p.name} in a farm log, so you can repeat the position on the next protocol or unwind it cleanly. Cost: nothing but the log. Time: 5 minutes.`,
     ),
   );
   return steps;
 }
 
-/** The ranked board: every clean pre-token protocol — watchlist plus early. */
+/** The ranked board: every clean pre-token protocol — watchlist plus early.
+ * Watchlist slugs are ranked whatever their shape: the gate requires them. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const peers = peerMultiples(snapshot, model);
+  const wl = new Set(snapshot.watchlist);
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const chosen = new Map<string, SnapshotProtocol>();
   for (const slug of snapshot.watchlist) {
@@ -461,7 +637,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     if (p !== undefined) chosen.set(slug, p);
   }
   for (const p of snapshot.protocols) {
-    if (!chosen.has(p.slug) && isRankable(p)) chosen.set(p.slug, p);
+    if (!chosen.has(p.slug) && isRankable(p, wl)) chosen.set(p.slug, p);
   }
   const scored = [...chosen.values()].map((p) => {
     const tier: Tier = snapshot.watchlist.includes(p.slug) ? 'watchlist' : 'early';
@@ -521,10 +697,13 @@ export function liveRows(snapshot: Snapshot, limit = 24): LiveRow[] {
 }
 
 /** The flagged protocols, unranked, by TVL: the wrapped / staked / bridged
- * products the board refuses to rank as launches, with the reason each. */
+ * products the board refuses to rank as launches, with the reason each.
+ * Watchlist rows are never flagged: the gate ranks them, so they stay on
+ * the board whatever their shape. */
 export function flaggedRows(snapshot: Snapshot): FlaggedRow[] {
+  const wl = new Set(snapshot.watchlist);
   return snapshot.protocols
-    .filter((p) => isPreToken(p) && !isRankable(p) && tierOf(p).tier === 'flagged')
+    .filter((p) => isPreToken(p) && !isRankable(p, wl) && tierOf(p).tier === 'flagged')
     .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : 1))
     .map((p) => ({
       slug: p.slug,
@@ -570,6 +749,7 @@ export function buildRadar(
       tier: r.tier,
       flag_reason: r.flag_reason,
       peer_multiple: r.model.peer_multiple,
+      peer_count: r.model.peer_count,
       growth_multiplier: r.model.growth_multiplier,
       maturity_multiplier: r.model.maturity_multiplier,
       chain_multiplier: r.model.chain_multiplier,
